@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>Responsive Shape Canvas with Noise</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas {
+      display: block;
+      position: absolute;
+    }
+  </style>
+</head>
+<body>
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lil-gui@0.18"></script>
+<script>
+let scene, camera, renderer;
+let shapes = [];
+let gradientMesh, gradientMaterial, noiseMesh, noiseMaterial;
+
+let canvasWidth = window.innerWidth;
+let canvasHeight = window.innerHeight;
+let prevWidth = canvasWidth;
+let prevHeight = canvasHeight;
+
+const settings = {
+  backgroundColor1: '#b1c8c4',
+  backgroundColor2: '#8074aa',
+  gradientAngle: 180,
+  shapeColor: '#6bffe1',
+  shapeOpacity: 0.5,
+  shapeCount: 150,
+  shapeSpeed: 0.1,
+  shapeType: 'triangle',
+  shapeResolution: 32,
+  shapeMinSize: 4,
+  shapeMaxSize: 14,
+  shapeRotationSpeed: 1.0,
+  mouseInfluence: 30,
+  mouseEasing: 0.008,
+  wheelSpeed: 0.1,
+  wheelEasing: 0.01,
+  noiseOpacity: 0// 0.05
+};
+
+let mouse = new THREE.Vector2();
+let targetOffset = new THREE.Vector2();
+let currentOffset = new THREE.Vector2();
+let targetWheelOffset = new THREE.Vector2();
+let currentWheelOffset = new THREE.Vector2();
+
+init();
+animate();
+setupGUI();
+
+function init() {
+  scene = new THREE.Scene();
+  camera = new THREE.OrthographicCamera(
+    canvasWidth / -2, canvasWidth / 2,
+    canvasHeight / 2, canvasHeight / -2,
+    1, 1000
+  );
+  camera.position.z = 10;
+
+  renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+  renderer.setSize(canvasWidth, canvasHeight);
+  document.body.appendChild(renderer.domElement);
+
+  createBackground();
+  createShapes();
+  createNoise();
+
+  window.addEventListener('resize', onWindowResize);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('wheel', onWheel);
+}
+
+function createBackground() {
+  const bgGeometry = new THREE.PlaneGeometry(canvasWidth, canvasHeight);
+  gradientMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor1: { value: new THREE.Color(settings.backgroundColor1) },
+      uColor2: { value: new THREE.Color(settings.backgroundColor2) },
+      uAngle: { value: settings.gradientAngle * Math.PI / 180.0 },
+      uResolution: { value: new THREE.Vector2(canvasWidth, canvasHeight) }
+    },
+    vertexShader: `varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform vec3 uColor1;
+      uniform vec3 uColor2;
+      uniform float uAngle;
+      uniform vec2 uResolution;
+      varying vec2 vUv;
+      void main() {
+        float angle = uAngle;
+        vec2 rotatedUv = vec2(
+          cos(angle) * (vUv.x - 0.5) - sin(angle) * (vUv.y - 0.5),
+          sin(angle) * (vUv.x - 0.5) + cos(angle) * (vUv.y - 0.5)
+        ) + 0.5;
+        gl_FragColor = vec4(mix(uColor1, uColor2, rotatedUv.y), 1.0);
+      }`,
+    depthWrite: false,
+    depthTest: false,
+    side: THREE.DoubleSide
+  });
+
+  gradientMesh = new THREE.Mesh(bgGeometry, gradientMaterial);
+  gradientMesh.position.z = -5;
+  scene.add(gradientMesh);
+}
+
+function createNoise() {
+  const noiseGeo = new THREE.PlaneGeometry(canvasWidth, canvasHeight);
+  noiseMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      uNoiseOpacity: { value: settings.noiseOpacity },
+      uResolution: { value: new THREE.Vector2(canvasWidth, canvasHeight) }
+    },
+    vertexShader: `varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float uNoiseOpacity;
+      uniform vec2 uResolution;
+      varying vec2 vUv;
+      float random(vec2 p) {
+        return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453);
+      }
+      void main() {
+        vec2 p = vUv * uResolution;
+        float n = random(p);
+        gl_FragColor = vec4(vec3(n), uNoiseOpacity);
+      }`,
+    transparent: true
+  });
+
+  noiseMesh = new THREE.Mesh(noiseGeo, noiseMaterial);
+  noiseMesh.position.z = -4;
+  scene.add(noiseMesh);
+}
+
+function createGeometry() {
+  switch (settings.shapeType) {
+    case 'square': return new THREE.PlaneGeometry(1, 1);
+    case 'circle': return new THREE.CircleGeometry(0.5, settings.shapeResolution);
+    default:
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+        0, 1, 0, -1, -1, 0, 1, -1, 0
+      ]), 3));
+      return geo;
+  }
+}
+
+function createShapes() {
+  shapes.forEach(shape => {
+    scene.remove(shape);
+    shape.geometry.dispose();
+    shape.material.dispose();
+  });
+  shapes = [];
+
+  const geometry = createGeometry();
+  for (let i = 0; i < settings.shapeCount; i++) {
+    const size = Math.random() * (settings.shapeMaxSize - settings.shapeMinSize) + settings.shapeMinSize;
+    const scale = size / 2;
+    const opacity = Math.random() < 0.5 ? settings.shapeOpacity * 0.2 : settings.shapeOpacity;
+    const material = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(settings.shapeColor),
+      transparent: true,
+      opacity,
+      depthWrite: false
+    });
+
+    const shape = new THREE.Mesh(geometry, material);
+    shape.position.x = (Math.random() - 0.5) * canvasWidth;
+    shape.position.y = (Math.random() - 0.5) * canvasHeight;
+
+    shape.userData = {
+      // shapeSpeedをvelocityに反映
+      velocity: {
+        x: (Math.random() - 0.5) * settings.shapeSpeed,
+        y: (Math.random() - 0.5) * settings.shapeSpeed
+      },
+      rotationSpeed: {
+        x: (Math.random() - 0.5) * 0.01,
+        y: (Math.random() - 0.5) * 0.01,
+        z: (Math.random() - 0.5) * 0.01
+      },
+      material
+    };
+    shape.scale.set(scale, scale, 1);
+    scene.add(shape);
+    shapes.push(shape);
+  }
+}
+
+function resetCanvas() {
+  // 既存のレンダラーDOMを削除
+  if (renderer) {
+    renderer.dispose();
+    if (renderer.domElement && renderer.domElement.parentNode) {
+      renderer.domElement.parentNode.removeChild(renderer.domElement);
+    }
+  }
+
+  // 旧オブジェクトのクリーンアップ
+  shapes.forEach(s => {
+    s.geometry.dispose();
+    s.material.dispose();
+  });
+  if (gradientMesh) {
+    gradientMesh.geometry.dispose();
+    gradientMesh.material.dispose();
+  }
+  if (noiseMesh) {
+    noiseMesh.geometry.dispose();
+    noiseMesh.material.dispose();
+  }
+
+  // 変数をリセット
+  shapes = [];
+
+  // シーン、カメラ、レンダラーを再生成
+  scene = new THREE.Scene();
+  camera = new THREE.OrthographicCamera(
+    canvasWidth / -2, canvasWidth / 2,
+    canvasHeight / 2, canvasHeight / -2,
+    1, 1000
+  );
+  camera.position.z = 10;
+
+  renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+  renderer.setSize(canvasWidth, canvasHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // 再構築
+  createBackground();
+  createShapes();
+  createNoise();
+}
+
+function onWindowResize() {
+  const newWidth = window.innerWidth;
+  const newHeight = window.innerHeight;
+  if (newWidth !== canvasWidth || newHeight !== canvasHeight) {
+    canvasWidth = newWidth;
+    canvasHeight = newHeight;
+
+    // update camera and renderer
+    camera.left = canvasWidth / -2;
+    camera.right = canvasWidth / 2;
+    camera.top = canvasHeight / 2;
+    camera.bottom = canvasHeight / -2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(canvasWidth, canvasHeight);
+
+    // update gradient
+    gradientMesh.geometry.dispose();
+    gradientMesh.geometry = new THREE.PlaneGeometry(canvasWidth, canvasHeight);
+    gradientMaterial.uniforms.uResolution.value.set(canvasWidth, canvasHeight);
+
+    // update noise
+    noiseMesh.geometry.dispose();
+    noiseMesh.geometry = new THREE.PlaneGeometry(canvasWidth, canvasHeight);
+    noiseMaterial.uniforms.uResolution.value.set(canvasWidth, canvasHeight);
+
+    // update shapes
+    const oldRotations = shapes.map(s => s.rotation.clone());
+    createShapes();
+    shapes.forEach((s, i) => {
+      if (oldRotations[i]) s.rotation.copy(oldRotations[i]);
+      s.position.x += (Math.random() - 0.5) * 10;
+      s.position.y += (Math.random() - 0.5) * 10;
+    });
+  }
+}
+
+function onMouseMove(e) {
+  const newMouse = new THREE.Vector2(e.clientX / canvasWidth, e.clientY / canvasHeight);
+  const delta = newMouse.clone().sub(mouse);
+  targetOffset.add(delta.multiplyScalar(settings.mouseInfluence));
+  mouse.copy(newMouse);
+}
+
+function onWheel(e) {
+  targetWheelOffset.y += e.deltaY * settings.wheelSpeed;
+  targetWheelOffset.x += e.deltaX * settings.wheelSpeed;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  currentOffset.lerp(targetOffset, settings.mouseEasing);
+  currentWheelOffset.lerp(targetWheelOffset, settings.wheelEasing);
+
+  shapes.forEach(shape => {
+    // shapeSpeedを適用した移動処理
+    shape.position.x += shape.userData.velocity.x + currentOffset.x + currentWheelOffset.x;
+    shape.position.y += shape.userData.velocity.y + currentOffset.y + currentWheelOffset.y;
+
+    shape.rotation.x += shape.userData.rotationSpeed.x * settings.shapeRotationSpeed;
+    shape.rotation.y += shape.userData.rotationSpeed.y * settings.shapeRotationSpeed;
+    shape.rotation.z += shape.userData.rotationSpeed.z * settings.shapeRotationSpeed;
+
+    if (shape.position.x < -canvasWidth / 2) shape.position.x = canvasWidth / 2;
+    if (shape.position.x > canvasWidth / 2) shape.position.x = -canvasWidth / 2;
+    if (shape.position.y < -canvasHeight / 2) shape.position.y = canvasHeight / 2;
+    if (shape.position.y > canvasHeight / 2) shape.position.y = -canvasHeight / 2;
+  });
+
+  targetOffset.multiplyScalar(0.95);
+  targetWheelOffset.multiplyScalar(0.9);
+  renderer.render(scene, camera);
+}
+
+function setupGUI() {
+  const gui = new lil.GUI();
+  gui.addColor(settings, 'backgroundColor1').onChange(val => gradientMaterial.uniforms.uColor1.value.set(val));
+  gui.addColor(settings, 'backgroundColor2').onChange(val => gradientMaterial.uniforms.uColor2.value.set(val));
+  gui.add(settings, 'gradientAngle', 0, 360).onChange(val => {
+    gradientMaterial.uniforms.uAngle.value = val * Math.PI / 180.0;
+  });
+  gui.addColor(settings, 'shapeColor').onChange(val => {
+    shapes.forEach(s => s.userData.material.color.set(val));
+  });
+  gui.add(settings, 'shapeOpacity', 0, 1).step(0.01).onChange(val => {
+    shapes.forEach(s => s.userData.material.opacity = val);
+  });
+  gui.add(settings, 'shapeCount', 1, 500).step(1).onChange(createShapes);
+  gui.add(settings, 'shapeSpeed', 0, 1).step(0.01);
+  gui.add(settings, 'shapeType', ['triangle', 'square', 'circle']).onChange(createShapes);
+  gui.add(settings, 'shapeResolution', 3, 64).step(1).onChange(createShapes);
+  gui.add(settings, 'shapeMinSize', 1, 50).step(1).onChange(createShapes);
+  gui.add(settings, 'shapeMaxSize', 1, 50).step(1).onChange(createShapes);
+  gui.add(settings, 'shapeRotationSpeed', 0, 5).step(0.01);
+  gui.add(settings, 'mouseInfluence', 0, 50.0).step(0.1);
+  gui.add(settings, 'mouseEasing', 0.001, 1.0).step(0.001);
+  gui.add(settings, 'wheelSpeed', 0, 5).step(0.01);
+  gui.add(settings, 'wheelEasing', 0.001, 1.0).step(0.001);
+  gui.add(settings, 'noiseOpacity', 0, 1).onChange(val => {
+    noiseMaterial.uniforms.uNoiseOpacity.value = val;
+  });
+}
+</script>
+</body>
+</html>
